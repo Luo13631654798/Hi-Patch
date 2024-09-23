@@ -7,6 +7,7 @@ from sklearn.metrics import roc_auc_score, classification_report, confusion_matr
 
 warnings.filterwarnings("ignore")
 
+# Argument parser for command-line options
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='physionet', choices=['P12', 'P19', 'physionet', 'mimic3'])
 parser.add_argument('--cuda', type=str, default='1')
@@ -16,41 +17,42 @@ parser.add_argument('--lr', type=float, default=1e-3)
 
 parser.add_argument('--history', type=int, default=48, help="number of hours (months for ushcn and ms for activity) as historical window")
 parser.add_argument('--nhead', type=int, default=1, help="heads in Transformer")
-parser.add_argument('--nlayer', type=int, default=1, help="# of layer in TSmodel")
+parser.add_argument('--nlayer', type=int, default=1, help="# of layer in GAT")
 parser.add_argument('-ps', '--patch_size', type=float, default=6, help="window size for a patch")
 parser.add_argument('--stride', type=float, default=6, help="period stride for patch sliding")
-parser.add_argument('-hd', '--hid_dim', type=int, default=64, help="Number of units per hidden layer")
-parser.add_argument('--alpha', type=float, default=1, help="Uncertainty base number")
+parser.add_argument('-hd', '--hid_dim', type=int, default=64, help="Hidden dim of node embeddings")
+parser.add_argument('--alpha', type=float, default=1, help="Proportion of Time decay")
 parser.add_argument('--res', type=float, default=1, help="Res")
 
 
 args, unknown = parser.parse_known_args()
 print(args)
 
+# Set CUDA environment variables
 os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-from model import *
 from model.hipatch import *
 from lib.utils import *
 
+# Set device for training
 args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 torch.use_deterministic_algorithms(True)
 
-# Create model save path
+# Model save path
 model_path = './models/'
 if not os.path.exists(model_path):
     os.mkdir(model_path)
 
-# Load command line hyperparameters
+# Load command-line arguments
 dataset = args.dataset
 batch_size = args.batch_size
 learning_rate = args.lr
 num_epochs = args.epochs
 
-
+# Recursive function to determine the layer of patches
 def layer_of_patches(n_patch):
     if n_patch == 1:
         return 1
@@ -58,10 +60,13 @@ def layer_of_patches(n_patch):
         return 1 + layer_of_patches(n_patch / 2)
     else:
         return layer_of_patches(n_patch + 1)
+# Function to count model parameters
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 print('Dataset used: ', dataset)
 
-# Set dataset parameters
+# Dataset specific parameters
 if dataset == 'P12':
     base_path = '../data/P12'
     start = 0
@@ -110,8 +115,8 @@ elif dataset == 'mimic3':
 acc_arr = []
 auprc_arr = []
 auroc_arr = []
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 # Run five experiments
 for k in range(5):
     # Set different random seed
@@ -119,7 +124,6 @@ for k in range(5):
     torch.cuda.manual_seed(k)
     np.random.seed(k)
 
-    # Load semantic representations of variables obtained through PLM
     if dataset == 'P12':
         split_path = '/splits/phy12_split' + str(split_idx) + '.npy'
     elif dataset == 'physionet':
@@ -207,6 +211,7 @@ for k in range(5):
 
     start = time.time()
 
+    # Training loop
     for epoch in range(num_epochs):
         if epoch - best_val_epoch > 5:
             break
@@ -268,18 +273,18 @@ for k in range(5):
                            model_path + '_' + dataset + '_' + save_time + '_' + str(k) + '.pt')
 
 
-            out_test = evaluate_model_patch(model, Ptest_tensor, Ptest_mask_tensor, Ptest_static_tensor,
-                                            Ptest_time_tensor,
-                                            n_classes=n_class, batch_size=batch_size).numpy()
-            denoms = np.sum(np.exp(out_test.astype(np.float64)), axis=1).reshape((-1, 1))
-            y_test = ytest.copy()
-            probs = np.exp(out_test.astype(np.float64)) / denoms
-            ypred = np.argmax(out_test, axis=1)
-            acc = np.sum(y_test.ravel() == ypred.ravel()) / y_test.shape[0]
-            auc = roc_auc_score(y_test, probs[:, 1])
-            aupr = average_precision_score(y_test, probs[:, 1])
-
-            print('Testing: AUROC = %.2f | AUPRC = %.2f | Accuracy = %.2f' % (auc * 100, aupr * 100, acc * 100))
+            # out_test = evaluate_model_patch(model, Ptest_tensor, Ptest_mask_tensor, Ptest_static_tensor,
+            #                                 Ptest_time_tensor,
+            #                                 n_classes=n_class, batch_size=batch_size).numpy()
+            # denoms = np.sum(np.exp(out_test.astype(np.float64)), axis=1).reshape((-1, 1))
+            # y_test = ytest.copy()
+            # probs = np.exp(out_test.astype(np.float64)) / denoms
+            # ypred = np.argmax(out_test, axis=1)
+            # acc = np.sum(y_test.ravel() == ypred.ravel()) / y_test.shape[0]
+            # auc = roc_auc_score(y_test, probs[:, 1])
+            # aupr = average_precision_score(y_test, probs[:, 1])
+            #
+            # print('Testing: AUROC = %.2f | AUPRC = %.2f | Accuracy = %.2f' % (auc * 100, aupr * 100, acc * 100))
 
 
 
@@ -288,7 +293,7 @@ for k in range(5):
     time_elapsed = end - start
     print('Total Time elapsed: %.3f mins' % (time_elapsed / 60.0))
 
-    """testing"""
+    """Testing"""
     model.eval()
     model.load_state_dict(
         torch.load(model_path + '_' + dataset + '_' + save_time + '_' + str(k) + '.pt'))
